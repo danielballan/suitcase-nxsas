@@ -125,14 +125,16 @@ class Serializer(event_model.SingleRunDocumentRouter):
         super().__init__()
         self.log = logging.getLogger("suitcase.nxsas")
 
-        if not isinstance(directory, Path):
-            directory = Path(directory)
-        self.directory = directory
+        if isinstance(directory, (str, Path)):
+            self._manager = suitcase.utils.MultiFileManager(directory)
+        else:
+            self._manager = directory
+
         self._file_prefix = file_prefix
         self._kwargs = kwargs
 
-        self._templated_file_prefix = None  # set when we get a 'start' document
-        self.output_filepath = None
+        # set when we get a 'start' document
+        self._templated_file_prefix = None
         self._h5_output_file = None
 
         self.bluesky_h5_group_name = "bluesky"
@@ -148,16 +150,13 @@ class Serializer(event_model.SingleRunDocumentRouter):
         # This must be a property, not a plain attribute, because the
         # manager's `artifacts` attribute is also a property, and we must
         # access it anew each time to be sure to get the latest contents.
-        if self.output_filepath is None:
-            raise Exception("No artifacts have been created yet.")
-
-        return {"stream_data": [self.output_filepath]}
+        return self._manager.artifacts
 
     def close(self):
         """
         Close all of the resources (e.g. files) allocated.
         """
-        self._h5_output_file.close()
+        self._manager.close()
 
     # These methods enable the Serializer to be used as a context manager:
     #
@@ -199,18 +198,10 @@ class Serializer(event_model.SingleRunDocumentRouter):
         # or 'my-data-from-{plan-name}' -> 'my-data-from-scan'
         self.log.info("new run detected uid=%s", start_doc["uid"])
         self._templated_file_prefix = self._file_prefix.format(**start_doc)
-        self.filename = Path(self._templated_file_prefix + ".h5")
+        filename = Path(self._templated_file_prefix + ".h5")
 
-        self.log.info("creating file %s in directory %s", self.filename, self.directory)
-
-        # self.filename may contain directories
-        output_file_path = self.directory / self.filename
-        output_dir_path = output_file_path.parent
-        if not output_dir_path.exists():
-            output_dir_path.mkdir(parents=True)
-
-        self.output_filepath = self.directory / self.filename
-        self._h5_output_file = h5py.File(self.output_filepath, "w")
+        file = self._manager.open("stream_data", filename, "wb")
+        self._h5_output_file = h5py.File(file, **self._kwargs)
 
         # create a top-level group to hold bluesky document information
         h5_bluesky_group = self._h5_output_file.create_group(self.bluesky_h5_group_name)
@@ -473,8 +464,6 @@ class Serializer(event_model.SingleRunDocumentRouter):
                 _copy_nexus_md_to_nexus_h5(
                     nexus_md=technique_info["nxsas"], h5_group_or_dataset=self._h5_output_file
                 )
-
-        self.log.info("finished writing file %s", self.filename)
 
         self.close()
 
